@@ -73,6 +73,17 @@
 #include <stereo_msgs/DisparityImage.h>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.h>
 
+/*************************CUSTOM HEADERS***********************************/
+#include <vision_msgs/Detection2DArray.h>
+#include <vision_msgs/Detection2D.h>
+#include <vision_msgs/BoundingBox2D.h>
+#include <vision_msgs/ObjectHypothesisWithPose.h>
+#include "zed_interfaces/Object.h"
+#include "zed_interfaces/ObjectsStamped.h"
+#include <zed_interfaces/PlaneStamped.h>
+#include <visualization_msgs/MarkerArray.h>
+/**************************************************************************/
+
 #include <condition_variable>
 #include <memory>
 #include <mutex>
@@ -399,7 +410,19 @@ protected:
    */
     bool saveAreaMap(std::string file_path, std::string* out_msg = nullptr);
 
+
+    /********************************CUSTOM ADDITIONS******************************************/
+    // Added custom functions
+    void publish_rviz_markers(zed_interfaces::ObjectsStampedPtr objects);
+    void customDetectionsCallback(vision_msgs::Detection2DArrayConstPtr msg);
+
 private:
+    ros::Publisher mPubDetObjMarkers; // Publisher for Rviz markers
+    ros::Subscriber mCustomDetectionsSub;
+    vision_msgs::Detection2DArray mCustomDetections; 
+    std::string mCustomDetectionsTopic;
+    /******************************************************************************************/
+
     uint64_t mFrameCount = 0;
 
     // SDK version

@@ -30,9 +30,6 @@
 #include <ros/console.h>
 #endif
 
-#include "zed_interfaces/Object.h"
-#include "zed_interfaces/ObjectsStamped.h"
-#include <zed_interfaces/PlaneStamped.h>
 
 //#define DEBUG_SENS_TS 1
 
@@ -161,6 +158,9 @@ void ZEDWrapperNodelet::onInit()
     // Extracted plane topics
     std::string marker_topic = "plane_marker";
     std::string plane_topic = "plane";
+
+    // Detected objects
+    std::string det_obj_markers_topic = "det_obj_markers";
 
     // Create camera info
     mRgbCamInfoMsg.reset(new sensor_msgs::CameraInfo());
@@ -467,6 +467,7 @@ void ZEDWrapperNodelet::onInit()
     if (mObjDetEnabled) {
         mPubObjDet = mNhNs.advertise<zed_interfaces::ObjectsStamped>(object_det_topic, 1);
         NODELET_INFO_STREAM("Advertised on topic " << mPubObjDet.getTopic());
+        mPubDetObjMarkers = mNhNs.advertise<visualization_msgs::MarkerArray>(det_obj_markers_topic, 10, true);
     }
 
     // Odometry and Pose publisher
@@ -481,7 +482,7 @@ void ZEDWrapperNodelet::onInit()
 
     // Rviz markers publisher
     mPubMarker = mNhNs.advertise<visualization_msgs::Marker>(marker_topic, 10, true);
-
+    
     // Detected planes publisher
     mPubPlane = mNhNs.advertise<zed_interfaces::PlaneStamped>(plane_topic, 1);
 
@@ -568,6 +569,7 @@ void ZEDWrapperNodelet::onInit()
 
     // Subscribers
     mClickedPtSub = mNhNs.subscribe(mClickedPtTopic, 10, &ZEDWrapperNodelet::clickedPtCallback, this);
+    mCustomDetectionsSub = mNhNs.subscribe(mCustomDetectionsTopic, 10, &ZEDWrapperNodelet::customDetectionsCallback, this);
 
     NODELET_INFO_STREAM("Subscribed to topic " << mClickedPtTopic.c_str());
 
@@ -764,6 +766,9 @@ void ZEDWrapperNodelet::readParameters()
     // ----> Object Detection
     mNhNs.param<bool>("object_detection/od_enabled", mObjDetEnabled, false);
 
+    mNhNs.getParam("object_detection/custom_detections_topic", mCustomDetectionsTopic);
+    NODELET_INFO_STREAM(" * Custom detections topic\t\t-> " << mCustomDetectionsTopic.c_str());
+
     if (mObjDetEnabled) {
         NODELET_INFO_STREAM(" * Object Detection\t\t-> ENABLED");
         mNhNs.getParam("object_detection/confidence_threshold", mObjDetConfidence);
@@ -787,24 +792,26 @@ void ZEDWrapperNodelet::readParameters()
 
         NODELET_INFO_STREAM(" * Detection model\t\t-> " << sl::toString(mObjDetModel));
 
-        if (mObjDetModel == sl::DETECTION_MODEL::HUMAN_BODY_ACCURATE || mObjDetModel == sl::DETECTION_MODEL::HUMAN_BODY_MEDIUM || mObjDetModel == sl::DETECTION_MODEL::HUMAN_BODY_FAST) {
-            mNhNs.getParam("object_detection/body_fitting", mObjDetBodyFitting);
-            NODELET_INFO_STREAM(" * Body fitting\t\t\t-> " << (mObjDetBodyFitting ? "ENABLED" : "DISABLED"));
-        } else {
-            mNhNs.getParam("object_detection/mc_people", mObjDetPeopleEnable);
-            NODELET_INFO_STREAM(" * Detect people\t\t-> " << (mObjDetPeopleEnable ? "ENABLED" : "DISABLED"));
-            mNhNs.getParam("object_detection/mc_vehicle", mObjDetVehiclesEnable);
-            NODELET_INFO_STREAM(" * Detect vehicles\t\t-> " << (mObjDetVehiclesEnable ? "ENABLED" : "DISABLED"));
-            mNhNs.getParam("object_detection/mc_bag", mObjDetBagsEnable);
-            NODELET_INFO_STREAM(" * Detect bags\t\t\t-> " << (mObjDetBagsEnable ? "ENABLED" : "DISABLED"));
-            mNhNs.getParam("object_detection/mc_animal", mObjDetAnimalsEnable);
-            NODELET_INFO_STREAM(" * Detect animals\t\t-> " << (mObjDetAnimalsEnable ? "ENABLED" : "DISABLED"));
-            mNhNs.getParam("object_detection/mc_electronics", mObjDetElectronicsEnable);
-            NODELET_INFO_STREAM(" * Detect electronics\t\t-> " << (mObjDetElectronicsEnable ? "ENABLED" : "DISABLED"));
-            mNhNs.getParam("object_detection/mc_fruit_vegetable", mObjDetFruitsEnable);
-            NODELET_INFO_STREAM(" * Detect fruit and vegetables\t-> " << (mObjDetFruitsEnable ? "ENABLED" : "DISABLED"));
-            mNhNs.getParam("object_detection/mc_sport", mObjDetSportsEnable);
-            NODELET_INFO_STREAM(" * Detect sport-related objects\t-> " << (mObjDetSportsEnable ? "ENABLED" : "DISABLED"));
+        if(mObjDetModel != sl::DETECTION_MODEL::CUSTOM_BOX_OBJECTS){
+            if (mObjDetModel == sl::DETECTION_MODEL::HUMAN_BODY_ACCURATE || mObjDetModel == sl::DETECTION_MODEL::HUMAN_BODY_MEDIUM || mObjDetModel == sl::DETECTION_MODEL::HUMAN_BODY_FAST) {
+                mNhNs.getParam("object_detection/body_fitting", mObjDetBodyFitting);
+                NODELET_INFO_STREAM(" * Body fitting\t\t\t-> " << (mObjDetBodyFitting ? "ENABLED" : "DISABLED"));
+            } else {
+                mNhNs.getParam("object_detection/mc_people", mObjDetPeopleEnable);
+                NODELET_INFO_STREAM(" * Detect people\t\t-> " << (mObjDetPeopleEnable ? "ENABLED" : "DISABLED"));
+                mNhNs.getParam("object_detection/mc_vehicle", mObjDetVehiclesEnable);
+                NODELET_INFO_STREAM(" * Detect vehicles\t\t-> " << (mObjDetVehiclesEnable ? "ENABLED" : "DISABLED"));
+                mNhNs.getParam("object_detection/mc_bag", mObjDetBagsEnable);
+                NODELET_INFO_STREAM(" * Detect bags\t\t\t-> " << (mObjDetBagsEnable ? "ENABLED" : "DISABLED"));
+                mNhNs.getParam("object_detection/mc_animal", mObjDetAnimalsEnable);
+                NODELET_INFO_STREAM(" * Detect animals\t\t-> " << (mObjDetAnimalsEnable ? "ENABLED" : "DISABLED"));
+                mNhNs.getParam("object_detection/mc_electronics", mObjDetElectronicsEnable);
+                NODELET_INFO_STREAM(" * Detect electronics\t\t-> " << (mObjDetElectronicsEnable ? "ENABLED" : "DISABLED"));
+                mNhNs.getParam("object_detection/mc_fruit_vegetable", mObjDetFruitsEnable);
+                NODELET_INFO_STREAM(" * Detect fruit and vegetables\t-> " << (mObjDetFruitsEnable ? "ENABLED" : "DISABLED"));
+                mNhNs.getParam("object_detection/mc_sport", mObjDetSportsEnable);
+                NODELET_INFO_STREAM(" * Detect sport-related objects\t-> " << (mObjDetSportsEnable ? "ENABLED" : "DISABLED"));
+            }
         }
     } else if (mObjDetModel != sl::DETECTION_MODEL::PERSON_HEAD_BOX) {
         NODELET_INFO_STREAM(" * Object Detection\t\t-> DISABLED");
@@ -1399,7 +1406,14 @@ bool ZEDWrapperNodelet::start_obj_detect()
     NODELET_INFO_STREAM("*** Starting Object Detection ***");
 
     sl::ObjectDetectionParameters od_p;
-    od_p.enable_mask_output = false;
+    
+    if(mObjDetModel == sl::DETECTION_MODEL::CUSTOM_BOX_OBJECTS){
+        od_p.enable_mask_output = true; // Outputs 2D masks over detected objects
+    }
+    else{
+        od_p.enable_mask_output = false;
+    }
+
     od_p.enable_tracking = mObjDetTracking;
     od_p.image_sync = false; // Asynchronous object detection
     od_p.detection_model = mObjDetModel;
@@ -1425,27 +1439,30 @@ bool ZEDWrapperNodelet::start_obj_detect()
 
     mObjDetFilter.clear();
 
-    if (mObjDetModel == sl::DETECTION_MODEL::MULTI_CLASS_BOX || mObjDetModel == sl::DETECTION_MODEL::MULTI_CLASS_BOX_MEDIUM || mObjDetModel == sl::DETECTION_MODEL::MULTI_CLASS_BOX_ACCURATE) {
-        if (mObjDetPeopleEnable) {
-            mObjDetFilter.push_back(sl::OBJECT_CLASS::PERSON);
-        }
-        if (mObjDetVehiclesEnable) {
-            mObjDetFilter.push_back(sl::OBJECT_CLASS::VEHICLE);
-        }
-        if (mObjDetBagsEnable) {
-            mObjDetFilter.push_back(sl::OBJECT_CLASS::BAG);
-        }
-        if (mObjDetAnimalsEnable) {
-            mObjDetFilter.push_back(sl::OBJECT_CLASS::ANIMAL);
-        }
-        if (mObjDetElectronicsEnable) {
-            mObjDetFilter.push_back(sl::OBJECT_CLASS::ELECTRONICS);
-        }
-        if (mObjDetFruitsEnable) {
-            mObjDetFilter.push_back(sl::OBJECT_CLASS::FRUIT_VEGETABLE);
-        }
-        if (mObjDetSportsEnable) {
-            mObjDetFilter.push_back(sl::OBJECT_CLASS::SPORT);
+    // Do not filter if using custom box objects
+    if(mObjDetModel != sl::DETECTION_MODEL::CUSTOM_BOX_OBJECTS){
+        if (mObjDetModel == sl::DETECTION_MODEL::MULTI_CLASS_BOX || mObjDetModel == sl::DETECTION_MODEL::MULTI_CLASS_BOX_MEDIUM || mObjDetModel == sl::DETECTION_MODEL::MULTI_CLASS_BOX_ACCURATE) {
+            if (mObjDetPeopleEnable) {
+                mObjDetFilter.push_back(sl::OBJECT_CLASS::PERSON);
+            }
+            if (mObjDetVehiclesEnable) {
+                mObjDetFilter.push_back(sl::OBJECT_CLASS::VEHICLE);
+            }
+            if (mObjDetBagsEnable) {
+                mObjDetFilter.push_back(sl::OBJECT_CLASS::BAG);
+            }
+            if (mObjDetAnimalsEnable) {
+                mObjDetFilter.push_back(sl::OBJECT_CLASS::ANIMAL);
+            }
+            if (mObjDetElectronicsEnable) {
+                mObjDetFilter.push_back(sl::OBJECT_CLASS::ELECTRONICS);
+            }
+            if (mObjDetFruitsEnable) {
+                mObjDetFilter.push_back(sl::OBJECT_CLASS::FRUIT_VEGETABLE);
+            }
+            if (mObjDetSportsEnable) {
+                mObjDetFilter.push_back(sl::OBJECT_CLASS::SPORT);
+            }
         }
     }
 
@@ -4277,7 +4294,10 @@ bool ZEDWrapperNodelet::on_start_object_detection(zed_interfaces::start_object_d
     if (mObjDetModel == sl::DETECTION_MODEL::HUMAN_BODY_ACCURATE || mObjDetModel == sl::DETECTION_MODEL::HUMAN_BODY_MEDIUM || mObjDetModel == sl::DETECTION_MODEL::HUMAN_BODY_FAST) {
         mObjDetBodyFitting = req.sk_body_fitting;
         NODELET_INFO_STREAM(" * Body fitting\t\t\t-> " << (mObjDetBodyFitting ? "ENABLED" : "DISABLED"));
-    } else {
+    } 
+    else if(mObjDetModel == sl::DETECTION_MODEL::CUSTOM_BOX_OBJECTS){
+            NODELET_INFO_STREAM(" * Detect custom objects\t\t-> " << "ENABLED");
+    }else {
         mObjDetPeopleEnable = req.mc_people;
         NODELET_INFO_STREAM(" * Detect people\t\t-> " << (mObjDetPeopleEnable ? "ENABLED" : "DISABLED"));
         mObjDetVehiclesEnable = req.mc_vehicles;
@@ -4319,6 +4339,42 @@ bool ZEDWrapperNodelet::on_stop_object_detection(zed_interfaces::stop_object_det
     return res.done;
 }
 
+std::vector<sl::uint2> bbx2abcd(vision_msgs::BoundingBox2D bbx)
+{
+    std::vector<sl::uint2> output; 
+    
+    int x_min = bbx.center.x - bbx.size_x;
+    int x_max = bbx.center.x + bbx.size_x;
+    int y_min = bbx.center.y - bbx.size_y;
+    int y_max = bbx.center.y + bbx.size_y;
+
+    // A ------ B
+    // | Object |
+    // D ------ C
+
+    sl::uint2 A; 
+    A[0] = x_min;
+    A[1] = y_min;
+    output.push_back(A); 
+
+    sl::uint2 B; 
+    B[0] = x_max;
+    B[1] = y_min;
+    output.push_back(B); 
+    
+    sl::uint2 C; 
+    C[0] = x_min;
+    C[1] = y_max;
+    output.push_back(C); 
+    
+    sl::uint2 D; 
+    D[0] = x_max;
+    D[1] = y_max;
+    output.push_back(D); 
+    
+    return output;
+}
+
 void ZEDWrapperNodelet::processDetectedObjects(ros::Time t)
 {
     static std::chrono::steady_clock::time_point old_time = std::chrono::steady_clock::now();
@@ -4327,6 +4383,26 @@ void ZEDWrapperNodelet::processDetectedObjects(ros::Time t)
     objectTracker_parameters_rt.detection_confidence_threshold = mObjDetConfidence;
     objectTracker_parameters_rt.object_class_filter = mObjDetFilter;
 
+    if(mObjDetModel == sl::DETECTION_MODEL::CUSTOM_BOX_OBJECTS){
+         // Preparing for ZED SDK ingesting
+         std::vector<sl::CustomBoxObjectData> objects_in;
+         for (auto &det : mCustomDetections.detections) {
+            sl::CustomBoxObjectData obj;
+
+            // Fill the detections into the correct format
+            obj.unique_object_id = sl::generate_unique_id();
+            obj.probability = det.results[0].score;
+            obj.label = det.results[0].id;
+            obj.bounding_box_2d = bbx2abcd(det.bbox);
+            obj.is_grounded = obj.label == 0; // Only the first class (person) is grounded, that is moving on the floor plane
+            // others are tracked in full 3D space                
+            objects_in.push_back(obj);
+        }
+        // Send the custom detected boxes to the ZED
+        mZed.ingestCustomBoxObjects(objects_in);
+    }
+
+    
     sl::Objects objects;
 
     sl::ERROR_CODE objDetRes = mZed.retrieveObjects(objects, objectTracker_parameters_rt);
@@ -4410,6 +4486,7 @@ void ZEDWrapperNodelet::processDetectedObjects(ros::Time t)
         idx++;
     }
 
+    publish_rviz_markers(objMsg);
     mPubObjDet.publish(objMsg);
 }
 
@@ -4677,6 +4754,49 @@ void ZEDWrapperNodelet::clickedPtCallback(geometry_msgs::PointStampedConstPtr ms
         mPubPlane.publish(planeMsg);
         // <---- Publish the plane as custom message
     }
+}
+
+
+void ZEDWrapperNodelet::customDetectionsCallback(vision_msgs::Detection2DArrayConstPtr msg)
+{
+    mCustomDetections = *msg;
+}
+
+void ZEDWrapperNodelet::publish_rviz_markers(zed_interfaces::ObjectsStampedPtr objects)
+{    
+    visualization_msgs::MarkerArray msg; 
+
+    int counter_id = 0;
+
+    for(auto bbx : objects->objects){
+        visualization_msgs::Marker bbx_marker; 
+
+        bbx_marker.header.frame_id = mLeftCamFrameId;
+        bbx_marker.header.stamp = objects->header.stamp;
+        bbx_marker.ns = "zed_wrapper";
+        bbx_marker.id = counter_id++;
+        bbx_marker.type = visualization_msgs::Marker::CUBE;
+        bbx_marker.action = visualization_msgs::Marker::ADD;
+        bbx_marker.pose.position.x = bbx.position[0];
+        bbx_marker.pose.position.y = bbx.position[1];
+        bbx_marker.pose.position.z = bbx.position[2];
+        bbx_marker.pose.orientation.x = 0.0; 
+        bbx_marker.pose.orientation.x = 0.0; 
+        bbx_marker.pose.orientation.x = 0.0; 
+        bbx_marker.pose.orientation.x = 1.0; 
+        bbx_marker.scale.x = bbx.dimensions_3d[0];
+        bbx_marker.scale.y = bbx.dimensions_3d[1];
+        bbx_marker.scale.z = bbx.dimensions_3d[2];
+        bbx_marker.color.b = 0; 
+        bbx_marker.color.g = bbx.confidence * 255.0;
+        bbx_marker.color.r = (1.0 - bbx.confidence) * 255.0;
+        bbx_marker.color.a = .4; 
+        bbx_marker.lifetime = ros::Duration(0.5); 
+
+        msg.markers.push_back(bbx_marker); 
+    }
+
+    mPubDetObjMarkers.publish(msg); 
 }
 
 } // namespace zed_nodelets
