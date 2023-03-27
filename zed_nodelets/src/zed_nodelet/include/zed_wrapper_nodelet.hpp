@@ -82,6 +82,8 @@
 #include "zed_interfaces/ObjectsStamped.h"
 #include <zed_interfaces/PlaneStamped.h>
 #include <visualization_msgs/MarkerArray.h>
+#include <fstream>
+#include <vector>
 /**************************************************************************/
 
 #include <condition_variable>
@@ -413,14 +415,16 @@ protected:
 
     /********************************CUSTOM ADDITIONS******************************************/
     // Added custom functions
-    void publish_rviz_markers(zed_interfaces::ObjectsStampedPtr objects);
+    void publish_object_markers(zed_interfaces::ObjectsStampedPtr objects);
     void customDetectionsCallback(vision_msgs::Detection2DArrayConstPtr msg);
 
 private:
-    ros::Publisher mPubDetObjMarkers; // Publisher for Rviz markers
+    ros::Publisher mPubObjDetMarkers; // Publisher for Rviz markers
     ros::Subscriber mCustomDetectionsSub;
     vision_msgs::Detection2DArray mCustomDetections; 
     std::string mCustomDetectionsTopic;
+    std::string mCustomClassesPath; 
+    std::vector<std::string> mClassLabels; 
     /******************************************************************************************/
 
     uint64_t mFrameCount = 0;
