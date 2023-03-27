@@ -160,7 +160,7 @@ void ZEDWrapperNodelet::onInit()
     std::string plane_topic = "plane";
 
     // Detected objects
-    std::string det_obj_markers_topic = "det_obj_markers";
+    std::string object_markers_topic = object_det_topic_root + "/object_markers";
 
     // Create camera info
     mRgbCamInfoMsg.reset(new sensor_msgs::CameraInfo());
@@ -467,7 +467,8 @@ void ZEDWrapperNodelet::onInit()
     if (mObjDetEnabled) {
         mPubObjDet = mNhNs.advertise<zed_interfaces::ObjectsStamped>(object_det_topic, 1);
         NODELET_INFO_STREAM("Advertised on topic " << mPubObjDet.getTopic());
-        mPubDetObjMarkers = mNhNs.advertise<visualization_msgs::MarkerArray>(det_obj_markers_topic, 10, true);
+        mPubObjDetMarkers = mNhNs.advertise<visualization_msgs::MarkerArray>(object_markers_topic, 10, true);
+        NODELET_INFO_STREAM("Advertised on topic " << mPubObjDetMarkers.getTopic());
     }
 
     // Odometry and Pose publisher
@@ -569,7 +570,11 @@ void ZEDWrapperNodelet::onInit()
 
     // Subscribers
     mClickedPtSub = mNhNs.subscribe(mClickedPtTopic, 10, &ZEDWrapperNodelet::clickedPtCallback, this);
-    mCustomDetectionsSub = mNhNs.subscribe(mCustomDetectionsTopic, 10, &ZEDWrapperNodelet::customDetectionsCallback, this);
+
+    // Subscribe to custom object detection topic
+    if(mObjDetModel == sl::DETECTION_MODEL::CUSTOM_BOX_OBJECTS){
+        mCustomDetectionsSub = mNhNs.subscribe(mCustomDetectionsTopic, 10, &ZEDWrapperNodelet::customDetectionsCallback, this);
+    }
 
     NODELET_INFO_STREAM("Subscribed to topic " << mClickedPtTopic.c_str());
 
@@ -765,10 +770,7 @@ void ZEDWrapperNodelet::readParameters()
 
     // ----> Object Detection
     mNhNs.param<bool>("object_detection/od_enabled", mObjDetEnabled, false);
-
-    mNhNs.getParam("object_detection/custom_detections_topic", mCustomDetectionsTopic);
-    NODELET_INFO_STREAM(" * Custom detections topic\t\t-> " << mCustomDetectionsTopic.c_str());
-
+    
     if (mObjDetEnabled) {
         NODELET_INFO_STREAM(" * Object Detection\t\t-> ENABLED");
         mNhNs.getParam("object_detection/confidence_threshold", mObjDetConfidence);
@@ -792,7 +794,30 @@ void ZEDWrapperNodelet::readParameters()
 
         NODELET_INFO_STREAM(" * Detection model\t\t-> " << sl::toString(mObjDetModel));
 
-        if(mObjDetModel != sl::DETECTION_MODEL::CUSTOM_BOX_OBJECTS){
+        if(mObjDetModel == sl::DETECTION_MODEL::CUSTOM_BOX_OBJECTS){
+            mNhNs.getParam("object_detection/custom_detections_topic", mCustomDetectionsTopic);
+            NODELET_INFO_STREAM(" * Custom detections topic\t-> " << mCustomDetectionsTopic.c_str());
+
+            mNhNs.getParam("object_detection/classes_path", mCustomClassesPath);
+            NODELET_INFO_STREAM(" * Custom classes path\t\t-> " << mCustomClassesPath.c_str()); 
+
+            // Copy custom class names into class label list
+            std::ifstream classFileStream;
+            std::string line; 
+            classFileStream.open(mCustomClassesPath);
+            if(classFileStream.is_open()){
+                while(std::getline(classFileStream, line)) {
+                    mClassLabels.push_back(line.c_str());
+                }
+            }
+            classFileStream.close();    
+
+            NODELET_INFO_STREAM("*** CUSTOM CLASS LABELS ***");
+            for(int i = 0; i< mClassLabels.size(); i++){
+                NODELET_INFO_STREAM(" * " << i << ": "<< mClassLabels[i]);
+            }
+        }
+        else{
             if (mObjDetModel == sl::DETECTION_MODEL::HUMAN_BODY_ACCURATE || mObjDetModel == sl::DETECTION_MODEL::HUMAN_BODY_MEDIUM || mObjDetModel == sl::DETECTION_MODEL::HUMAN_BODY_FAST) {
                 mNhNs.getParam("object_detection/body_fitting", mObjDetBodyFitting);
                 NODELET_INFO_STREAM(" * Body fitting\t\t\t-> " << (mObjDetBodyFitting ? "ENABLED" : "DISABLED"));
@@ -4342,11 +4367,14 @@ bool ZEDWrapperNodelet::on_stop_object_detection(zed_interfaces::stop_object_det
 std::vector<sl::uint2> bbx2abcd(vision_msgs::BoundingBox2D bbx)
 {
     std::vector<sl::uint2> output; 
-    
-    int x_min = bbx.center.x - bbx.size_x;
-    int x_max = bbx.center.x + bbx.size_x;
-    int y_min = bbx.center.y - bbx.size_y;
-    int y_max = bbx.center.y + bbx.size_y;
+
+    // Bounding boxes are currently performed on a downsampled, 360x640 image
+    // Multiply by 2 to get the bbx coord in 720x1280 form
+    // Not sure why, maybe the Zed SDK defaults to processing everything in 720x1280?
+    int x_min = (bbx.center.x - bbx.size_x/2)*2;
+    int x_max = (bbx.center.x + bbx.size_x/2)*2;
+    int y_min = (bbx.center.y - bbx.size_y/2)*2;
+    int y_max = (bbx.center.y + bbx.size_y/2)*2;
 
     // A ------ B
     // | Object |
@@ -4356,7 +4384,7 @@ std::vector<sl::uint2> bbx2abcd(vision_msgs::BoundingBox2D bbx)
     A[0] = x_min;
     A[1] = y_min;
     output.push_back(A); 
-
+    
     sl::uint2 B; 
     B[0] = x_max;
     B[1] = y_min;
@@ -4384,9 +4412,9 @@ void ZEDWrapperNodelet::processDetectedObjects(ros::Time t)
     objectTracker_parameters_rt.object_class_filter = mObjDetFilter;
 
     if(mObjDetModel == sl::DETECTION_MODEL::CUSTOM_BOX_OBJECTS){
-         // Preparing for ZED SDK ingesting
-         std::vector<sl::CustomBoxObjectData> objects_in;
-         for (auto &det : mCustomDetections.detections) {
+        // Preparing for ZED SDK ingesting
+        std::vector<sl::CustomBoxObjectData> objects_in;
+        for (auto &det : mCustomDetections.detections) {
             sl::CustomBoxObjectData obj;
 
             // Fill the detections into the correct format
@@ -4435,8 +4463,15 @@ void ZEDWrapperNodelet::processDetectedObjects(ros::Time t)
 
     size_t idx = 0;
     for (auto data : objects.object_list) {
-        objMsg->objects[idx].label = sl::toString(data.label).c_str();
-        objMsg->objects[idx].sublabel = sl::toString(data.sublabel).c_str();
+        // Add custom labels
+        if(mObjDetModel == sl::DETECTION_MODEL::CUSTOM_BOX_OBJECTS){
+            objMsg->objects[idx].label = mClassLabels[data.raw_label];
+            objMsg->objects[idx].sublabel = mClassLabels[data.raw_label];
+        }
+        else{
+            objMsg->objects[idx].label = sl::toString(data.label).c_str();
+            objMsg->objects[idx].sublabel = sl::toString(data.sublabel).c_str(); 
+        }
         objMsg->objects[idx].label_id = data.id;
         objMsg->objects[idx].confidence = data.confidence;
 
@@ -4486,7 +4521,11 @@ void ZEDWrapperNodelet::processDetectedObjects(ros::Time t)
         idx++;
     }
 
-    publish_rviz_markers(objMsg);
+    // Publish rviz markers only if subscribed to
+    // Should use the provided zed visualizer plugin instead
+    if (mPubObjDetMarkers.getNumSubscribers() != 0) {
+        publish_object_markers(objMsg);
+    }
     mPubObjDet.publish(objMsg);
 }
 
@@ -4762,41 +4801,44 @@ void ZEDWrapperNodelet::customDetectionsCallback(vision_msgs::Detection2DArrayCo
     mCustomDetections = *msg;
 }
 
-void ZEDWrapperNodelet::publish_rviz_markers(zed_interfaces::ObjectsStampedPtr objects)
+void ZEDWrapperNodelet::publish_object_markers(zed_interfaces::ObjectsStampedPtr objects)
 {    
     visualization_msgs::MarkerArray msg; 
 
     int counter_id = 0;
 
     for(auto bbx : objects->objects){
-        visualization_msgs::Marker bbx_marker; 
+        if(!(isnan(bbx.position[0]) || isnan(bbx.position[1]) || isnan(bbx.position[2]))){
+            visualization_msgs::Marker marker; 
 
-        bbx_marker.header.frame_id = mLeftCamFrameId;
-        bbx_marker.header.stamp = objects->header.stamp;
-        bbx_marker.ns = "zed_wrapper";
-        bbx_marker.id = counter_id++;
-        bbx_marker.type = visualization_msgs::Marker::CUBE;
-        bbx_marker.action = visualization_msgs::Marker::ADD;
-        bbx_marker.pose.position.x = bbx.position[0];
-        bbx_marker.pose.position.y = bbx.position[1];
-        bbx_marker.pose.position.z = bbx.position[2];
-        bbx_marker.pose.orientation.x = 0.0; 
-        bbx_marker.pose.orientation.x = 0.0; 
-        bbx_marker.pose.orientation.x = 0.0; 
-        bbx_marker.pose.orientation.x = 1.0; 
-        bbx_marker.scale.x = bbx.dimensions_3d[0];
-        bbx_marker.scale.y = bbx.dimensions_3d[1];
-        bbx_marker.scale.z = bbx.dimensions_3d[2];
-        bbx_marker.color.b = 0; 
-        bbx_marker.color.g = bbx.confidence * 255.0;
-        bbx_marker.color.r = (1.0 - bbx.confidence) * 255.0;
-        bbx_marker.color.a = .4; 
-        bbx_marker.lifetime = ros::Duration(0.5); 
+            marker.header.frame_id = mLeftCamFrameId;
+            marker.header.stamp = objects->header.stamp;
+            marker.ns = "zed_wrapper";
+            marker.id = counter_id++;
+            marker.type = visualization_msgs::Marker::CUBE;
+            marker.action = visualization_msgs::Marker::ADD;
+            marker.pose.position.x = bbx.position[0];
+            marker.pose.position.y = bbx.position[1];
+            marker.pose.position.z = bbx.position[2];
+            marker.pose.orientation.x = 0.0; 
+            marker.pose.orientation.y = 0.0; 
+            marker.pose.orientation.z = 0.0; 
+            marker.pose.orientation.w = 1.0;
+            marker.scale.x = bbx.dimensions_3d[0];
+            // Not sure why I need to switch the dimensions here
+            marker.scale.y = bbx.dimensions_3d[2]; 
+            marker.scale.z = bbx.dimensions_3d[1];
+            marker.color.b = 0; 
+            marker.color.g = bbx.confidence * 255.0;
+            marker.color.r = (1.0 - bbx.confidence) * 255.0;
+            marker.color.a = .4; 
+            marker.lifetime = ros::Duration(0.5); 
 
-        msg.markers.push_back(bbx_marker); 
+            msg.markers.push_back(marker); 
+        }
     }
 
-    mPubDetObjMarkers.publish(msg); 
+    mPubObjDetMarkers.publish(msg); 
 }
 
 } // namespace zed_nodelets
